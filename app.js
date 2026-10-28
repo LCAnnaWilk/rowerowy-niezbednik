@@ -1,12 +1,15 @@
 'use strict';
 
 const STORAGE_KEY = 'rowerowy-niezbednik';
-const TABS = ['dziennik', 'tempo', 'zawody', 'checklista'];
+const TABS = ['dziennik', 'tempo', 'zawody', 'narzedzia', 'checklista'];
+const DAY = 86400000;
 
 // Próg (m) ignorujący szum wysokości z GPS przy liczeniu przewyższenia.
 const ELE_THRESHOLD = 3;
 // Poniżej tej prędkości (m/s) odcinek GPX traktujemy jako postój.
 const MIN_MOVING_SPEED = 1;
+// Prognoza Open-Meteo sięga 16 dni naprzód.
+const FORECAST_DAYS = 15;
 
 const DEFAULT_CHECKLIST = [
   'Numer startowy i agrafki',
@@ -26,6 +29,15 @@ const DEFAULT_CHECKLIST = [
   'Ubranie na przebranie po mecie'
 ];
 
+const GEAR_PRESETS = [
+  ['Łańcuch', 3000],
+  ['Opona tylna', 3500],
+  ['Opona przednia', 5000],
+  ['Klocki hamulcowe', 2000],
+  ['Kaseta', 9000],
+  ['Owijka', 6000]
+];
+
 const ICON = {
   edit: '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>',
   trash: '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>'
@@ -37,7 +49,10 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const num = v => { const n = parseFloat(String(v).replace(',', '.')); return Number.isFinite(n) ? n : 0; };
+const optNum = v => { const n = num(v); return n > 0 ? n : null; };
+const coord = v => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const pad = n => String(n).padStart(2, '0');
+const empty = text => `<p class="empty">${text}</p>`;
 
 const nf0 = new Intl.NumberFormat('pl-PL', { maximumFractionDigits: 0 });
 const nf1 = new Intl.NumberFormat('pl-PL', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
@@ -53,6 +68,10 @@ const toISODate = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getD
 const parseISODate = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
 const isISODate = s => /^\d{4}-\d{2}-\d{2}$/.test(s);
 const fmtDate = s => parseISODate(s).toLocaleDateString('pl-PL', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' });
+const fmtShort = d => d.toLocaleDateString('pl-PL', { day: 'numeric', month: 'long' });
+const today0 = () => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()); };
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const daysBetween = (a, b) => Math.round((b - a) / DAY);
 
 function startOfWeek(d) {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -66,6 +85,12 @@ function fmtDuration(sec) {
   return `${Math.floor(sec / 3600)}:${pad(Math.floor(sec % 3600 / 60))}:${pad(sec % 60)}`;
 }
 
+function fmtDelta(sec) {
+  const s = Math.abs(Math.round(sec));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+  return (sec < 0 ? '−' : '+') + (h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`);
+}
+
 function fmtClock(sec) {
   sec = Math.round(sec);
   const days = Math.floor(sec / 86400);
@@ -74,7 +99,8 @@ function fmtClock(sec) {
 }
 
 function readDuration(prefix) {
-  return Math.max(0, num($(`#${prefix}H`).value) * 3600 + num($(`#${prefix}M`).value) * 60 + num($(`#${prefix}S`).value));
+  const s = $(`#${prefix}S`) ? num($(`#${prefix}S`).value) : 0;
+  return Math.max(0, num($(`#${prefix}H`).value) * 3600 + num($(`#${prefix}M`).value) * 60 + s);
 }
 
 function setDuration(prefix, sec) {
@@ -82,6 +108,18 @@ function setDuration(prefix, sec) {
   $(`#${prefix}H`).value = sec > 0 ? Math.floor(sec / 3600) : '';
   $(`#${prefix}M`).value = sec > 0 ? Math.floor(sec % 3600 / 60) : '';
   $(`#${prefix}S`).value = sec > 0 ? sec % 60 : '';
+}
+
+function statTile(label, value, unit, sub, accent = false) {
+  return `<div class="stat${accent ? ' accent' : ''}">
+    <div class="stat-label">${label}</div>
+    <div class="stat-value">${value}${unit ? `<small>${unit}</small>` : ''}</div>
+    <div class="stat-sub">${sub}</div>
+  </div>`;
+}
+
+function setPressed(selector, active) {
+  document.querySelectorAll(selector).forEach(b => b.setAttribute('aria-pressed', String(b === active)));
 }
 
 let toastTimer;
@@ -99,11 +137,22 @@ function defaultChecklist() {
   return DEFAULT_CHECKLIST.map(text => ({ id: uid(), text, done: false }));
 }
 
+function normalizeResult(res) {
+  if (!res || typeof res !== 'object') return null;
+  const out = { time: Math.max(0, num(res.time)), place: optNum(res.place), cat: optNum(res.cat), note: String(res.note || '') };
+  return out.time || out.place || out.cat || out.note ? out : null;
+}
+
 function normalize(d) {
   if (!d || typeof d !== 'object') return null;
   const arr = x => (Array.isArray(x) ? x : []);
+  const p = d.profile && typeof d.profile === 'object' ? d.profile : {};
+  const prefs = {};
+  if (d.prefs && typeof d.prefs === 'object') {
+    for (const [k, v] of Object.entries(d.prefs)) if (typeof v === 'string' || typeof v === 'number') prefs[k] = v;
+  }
   return {
-    version: 1,
+    version: 2,
     rides: arr(d.rides)
       .filter(r => r && isISODate(String(r.date).slice(0, 10)) && num(r.distance) > 0)
       .map(r => ({
@@ -121,11 +170,21 @@ function normalize(d) {
         id: String(r.id || uid()),
         name: String(r.name),
         date: String(r.date),
-        time: /^\d{2}:\d{2}$/.test(r.time) ? r.time : ''
+        time: /^\d{2}:\d{2}$/.test(r.time) ? r.time : '',
+        place: String(r.place || ''),
+        lat: coord(r.lat),
+        lon: coord(r.lon),
+        placeLabel: String(r.placeLabel || ''),
+        result: normalizeResult(r.result)
       })),
     checklist: Array.isArray(d.checklist)
       ? d.checklist.filter(i => i && i.text).map(i => ({ id: String(i.id || uid()), text: String(i.text), done: !!i.done }))
-      : defaultChecklist()
+      : defaultChecklist(),
+    gear: arr(d.gear)
+      .filter(g => g && g.name && isISODate(String(g.since)))
+      .map(g => ({ id: String(g.id || uid()), name: String(g.name), limit: Math.max(0, num(g.limit)), since: String(g.since) })),
+    profile: { weight: optNum(p.weight), bikeWeight: optNum(p.bikeWeight), ftp: optNum(p.ftp), hrMax: optNum(p.hrMax) },
+    prefs
   };
 }
 
@@ -137,7 +196,7 @@ function load() {
       if (data) return data;
     }
   } catch (e) { /* brak dostępu do pamięci lub uszkodzone dane */ }
-  return { version: 1, rides: [], races: [], checklist: defaultChecklist() };
+  return normalize({});
 }
 
 function save() {
@@ -149,6 +208,36 @@ function save() {
 }
 
 let state = load();
+
+/* Ustawienia narzędzi i profil – zapisywane przy każdej zmianie pola. */
+
+function bindSettings() {
+  document.querySelectorAll('[data-pref]').forEach(el => {
+    const v = state.prefs[el.dataset.pref];
+    if (v !== undefined) el.value = v;
+  });
+  document.querySelectorAll('[data-profile]').forEach(el => {
+    const v = state.profile[el.dataset.profile];
+    el.value = v === null || v === undefined ? '' : v;
+  });
+}
+
+function onSettingChange(e) {
+  const el = e.target;
+  if (el.dataset.pref) {
+    state.prefs[el.dataset.pref] = el.value;
+  } else if (el.dataset.profile) {
+    const key = el.dataset.profile;
+    state.profile[key] = optNum(el.value);
+    document.querySelectorAll(`[data-profile="${key}"]`).forEach(o => { if (o !== el) o.value = el.value; });
+  } else {
+    return;
+  }
+  save();
+  renderTools();
+}
+document.addEventListener('input', onSettingChange);
+document.addEventListener('change', onSettingChange);
 
 /* ---------- Zakładki ---------- */
 
@@ -162,6 +251,7 @@ function showTab(name) {
   window.scrollTo(0, 0);
   if (name === 'dziennik') renderChart();
   if (name === 'zawody') renderRaces();
+  if (name === 'narzedzia') renderTools();
 }
 
 window.addEventListener('hashchange', () => showTab(location.hash.slice(1)));
@@ -175,13 +265,9 @@ function summarize(filter) {
   }, { km: 0, sec: 0, ele: 0, n: 0 });
 }
 
-function statTile(label, value, unit, sub, accent = false) {
-  return `<div class="stat${accent ? ' accent' : ''}">
-    <div class="stat-label">${label}</div>
-    <div class="stat-value">${value}${unit ? `<small>${unit}</small>` : ''}</div>
-    <div class="stat-sub">${sub}</div>
-  </div>`;
-}
+const kmBetween = (from, to) => state.rides
+  .filter(r => r.date >= from && (!to || r.date < to))
+  .reduce((a, r) => a + r.distance, 0);
 
 function renderStats() {
   const now = new Date();
@@ -212,21 +298,17 @@ function chartBuckets() {
   for (let i = 11; i >= 0; i--) {
     let from, to, label, title;
     if (chartMode === 'week') {
-      from = startOfWeek(now);
-      from.setDate(from.getDate() - i * 7);
-      to = new Date(from);
-      to.setDate(to.getDate() + 7);
+      from = addDays(startOfWeek(now), -i * 7);
+      to = addDays(from, 7);
       label = `${from.getDate()}.${pad(from.getMonth() + 1)}`;
-      title = `Tydzień od ${from.toLocaleDateString('pl-PL', { day: 'numeric', month: 'long' })}`;
+      title = `Tydzień od ${fmtShort(from)}`;
     } else {
       from = new Date(now.getFullYear(), now.getMonth() - i, 1);
       to = new Date(from.getFullYear(), from.getMonth() + 1, 1);
       label = from.toLocaleDateString('pl-PL', { month: 'short' }).replace('.', '');
       title = from.toLocaleDateString('pl-PL', { month: 'long', year: 'numeric' });
     }
-    const f = toISODate(from), t = toISODate(to);
-    const km = state.rides.filter(r => r.date >= f && r.date < t).reduce((a, r) => a + r.distance, 0);
-    buckets.push({ label, title, km, current: i === 0 });
+    buckets.push({ label, title, km: kmBetween(toISODate(from), toISODate(to)), current: i === 0 });
   }
   return buckets;
 }
@@ -277,7 +359,7 @@ function renderChart() {
 
 document.querySelectorAll('[data-chart]').forEach(btn => btn.addEventListener('click', () => {
   chartMode = btn.dataset.chart;
-  document.querySelectorAll('[data-chart]').forEach(b => b.setAttribute('aria-pressed', String(b === btn)));
+  setPressed('[data-chart]', btn);
   renderChart();
 }));
 
@@ -497,12 +579,12 @@ function renderPace() {
   document.querySelectorAll('#paceChips .chip').forEach(c => c.setAttribute('aria-pressed', String(num(c.dataset.km) === d)));
 
   if (!(d > 0) || !(t > 0)) {
-    out.innerHTML = '<p class="empty">Wpisz dystans i docelowy czas – pokażę wymaganą średnią prędkość i międzyczasy co 10 km.</p>';
+    out.innerHTML = empty('Wpisz dystans i docelowy czas – pokażę wymaganą średnią prędkość i międzyczasy co 10 km.');
     return;
   }
 
   const speed = d / (t / 3600);
-  const secPerKm = t / d;
+  const secPerKm = Math.round(t / d);
   const start = $('#paceStart').value;
   const startSec = /^\d{2}:\d{2}/.test(start) ? Number(start.slice(0, 2)) * 3600 + Number(start.slice(3, 5)) * 60 : null;
 
@@ -512,9 +594,8 @@ function renderPace() {
 
   const rows = marks.map(k => {
     const at = t * k / d;
-    const isFinish = k === d;
     return `<tr>
-      <td>${nf2.format(k)} km${isFinish ? '<span class="finish">meta</span>' : ''}</td>
+      <td>${nf2.format(k)} km${k === d ? '<span class="finish">meta</span>' : ''}</td>
       <td>${fmtDuration(at)}</td>
       ${startSec !== null ? `<td>${fmtClock(startSec + at)}</td>` : ''}
     </tr>`;
@@ -523,8 +604,7 @@ function renderPace() {
   out.innerHTML = `
     <div class="result-hero">
       ${statTile('Wymagana średnia', nf1.format(speed), 'km/h', `na ${nf2.format(d)} km`, true)}
-      ${statTile('Czas na 1 km', `${Math.floor(Math.round(secPerKm) / 60)}:${pad(Math.round(secPerKm) % 60)}`, 'min',
-        `10 km co ${fmtDuration(secPerKm * 10)}`)}
+      ${statTile('Czas na 1 km', `${Math.floor(secPerKm / 60)}:${pad(secPerKm % 60)}`, 'min', `10 km co ${fmtDuration(t / d * 10)}`)}
     </div>
     <div class="card">
       <h3>Międzyczasy co 10 km</h3>
@@ -541,10 +621,12 @@ $('#paceChips').addEventListener('click', e => {
   const chip = e.target.closest('.chip');
   if (!chip) return;
   $('#paceDistance').value = chip.dataset.km;
-  renderPace();
+  $('#paceDistance').dispatchEvent(new Event('input', { bubbles: true }));
 });
 
-/* ---------- 3. Odliczanie do zawodów ---------- */
+/* ---------- 3. Zawody ---------- */
+
+const raceKey = name => name.trim().toLowerCase();
 
 function raceTarget(r) {
   const d = parseISODate(r.date);
@@ -554,52 +636,88 @@ function raceTarget(r) {
 
 function countdownParts(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
-  return {
-    d: Math.floor(s / 86400),
-    h: Math.floor(s % 86400 / 3600),
-    m: Math.floor(s % 3600 / 60),
-    s: s % 60
-  };
+  return { d: Math.floor(s / 86400), h: Math.floor(s % 86400 / 3600), m: Math.floor(s % 3600 / 60), s: s % 60 };
+}
+
+function upcomingRaces() {
+  const now = Date.now();
+  return state.races.filter(r => raceTarget(r) > now).sort((a, b) => raceTarget(a) - raceTarget(b));
+}
+
+function previousResult(race) {
+  const target = raceTarget(race);
+  return state.races
+    .filter(r => r.id !== race.id && raceKey(r.name) === raceKey(race.name) && r.result && r.result.time > 0 && raceTarget(r) < target)
+    .sort((a, b) => raceTarget(b) - raceTarget(a))[0] || null;
+}
+
+function resultHTML(r) {
+  const res = r.result;
+  if (!res) return `<button type="button" class="btn btn-secondary btn-sm race-result-btn" data-result="${esc(r.id)}">Dodaj wynik</button>`;
+  const parts = [];
+  if (res.time) parts.push(`<strong>${fmtDuration(res.time)}</strong>`);
+  if (res.place) parts.push(`${res.place}. miejsce open`);
+  if (res.cat) parts.push(`${res.cat}. w kategorii`);
+  let compare = '';
+  const prev = res.time ? previousResult(r) : null;
+  if (prev) {
+    const delta = res.time - prev.result.time;
+    const when = prev.date.slice(0, 4) !== r.date.slice(0, 4) ? prev.date.slice(0, 4) : fmtShort(parseISODate(prev.date));
+    compare = `<p class="delta ${delta <= 0 ? 'better' : 'worse'}">${fmtDelta(delta)} względem ${when} (${fmtDuration(prev.result.time)})</p>`;
+  }
+  return `<div class="result">
+      <div class="result-top"><span class="result-label">Wynik</span><button type="button" class="link-btn" data-result="${esc(r.id)}">Edytuj</button></div>
+      <div class="result-main">${parts.join(' · ') || '—'}</div>
+      ${compare}
+      ${res.note ? `<p class="ride-note">${esc(res.note)}</p>` : ''}
+    </div>`;
 }
 
 function renderRaces() {
   const now = Date.now();
   const today = toISODate(new Date());
-  const races = state.races.map(r => ({ ...r, target: raceTarget(r) }));
-  const isUpcoming = r => r.target > now;
-  const upcoming = races.filter(isUpcoming).sort((a, b) => a.target - b.target);
-  const past = races.filter(r => !isUpcoming(r)).sort((a, b) => b.target - a.target);
+  const isUpcoming = r => raceTarget(r) > now;
+  const upcoming = upcomingRaces();
+  const past = state.races.filter(r => !isUpcoming(r)).sort((a, b) => raceTarget(b) - raceTarget(a));
 
   const item = (r, i) => {
     const when = fmtDate(r.date) + (r.time ? `, godz. ${r.time}` : '');
     const head = `<div class="race-head">
         <div class="race-info">
-          ${i === 0 && isUpcoming(r) ? '<span class="race-tag">Najbliższe</span>' : ''}
+          ${i === 0 ? '<span class="race-tag">Najbliższe</span>' : ''}
           <div class="race-name">${esc(r.name)}</div>
-          <div class="race-date">${when}</div>
+          <div class="race-date">${when}${r.place ? ` · ${esc(r.place)}` : ''}</div>
         </div>
-        <button type="button" class="icon-btn danger" data-del="${esc(r.id)}" aria-label="Usuń zawody ${esc(r.name)}">${ICON.trash}</button>
+        <div class="race-actions">
+          <button type="button" class="icon-btn" data-edit="${esc(r.id)}" aria-label="Edytuj zawody ${esc(r.name)}">${ICON.edit}</button>
+          <button type="button" class="icon-btn danger" data-del="${esc(r.id)}" aria-label="Usuń zawody ${esc(r.name)}">${ICON.trash}</button>
+        </div>
       </div>`;
     if (isUpcoming(r)) {
-      return `<li class="race${i === 0 ? ' next' : ''}" data-target="${r.target}">${head}
+      return `<li class="race${i === 0 ? ' next' : ''}" data-target="${raceTarget(r)}">${head}
         <div class="countdown">
           <div class="cd-box"><span class="cd-num" data-u="d"></span><span class="cd-unit" data-l="d"></span></div>
           <div class="cd-box"><span class="cd-num" data-u="h"></span><span class="cd-unit">godz.</span></div>
           <div class="cd-box"><span class="cd-num" data-u="m"></span><span class="cd-unit">min</span></div>
           <div class="cd-box"><span class="cd-num" data-u="s"></span><span class="cd-unit">s</span></div>
         </div>
+        ${r.place ? `<div class="weather" data-weather="${esc(r.id)}"><span class="muted">Sprawdzam prognozę pogody…</span></div>` : ''}
       </li>`;
     }
-    const status = r.date === today
+    const isToday = r.date === today;
+    const status = isToday
       ? '<p class="race-status today">To dziś – powodzenia!</p>'
       : '<p class="race-status muted">Zawody już się odbyły</p>';
-    return `<li class="race${r.date === today ? '' : ' past'}">${head}${status}</li>`;
+    return `<li class="race${isToday ? '' : ' past'}">${head}${status}${resultHTML(r)}</li>`;
   };
 
-  $('#raceList').innerHTML = races.length
+  $('#raceList').innerHTML = state.races.length
     ? upcoming.map(item).join('') + past.map(r => item(r, -1)).join('')
-    : '<li class="empty">Brak zaplanowanych zawodów. Dodaj pierwsze powyżej.</li>';
+    : '<li class="empty">Brak zawodów. Dodaj własne powyżej albo wybierz z kalendarza 2027.</li>';
+  if (!state.races.length) $('#raceFormCard').open = true;
+  renderTaper();
   tickRaces();
+  updateWeather();
 }
 
 function tickRaces() {
@@ -617,33 +735,507 @@ function tickRaces() {
   }
 }
 
+setInterval(tickRaces, 1000);
+
+/* Formularz zawodów (dodawanie i edycja) */
+
+let editingRaceId = null;
+
+function resetRaceForm() {
+  $('#raceForm').reset();
+  editingRaceId = null;
+  $('#raceFormTitle').textContent = 'Dodaj zawody';
+  $('#raceSubmit').textContent = 'Dodaj zawody';
+  $('#raceCancel').hidden = true;
+}
+
 $('#raceForm').addEventListener('submit', e => {
   e.preventDefault();
   const name = $('#raceName').value.trim();
   const date = $('#raceDate').value;
   if (!name) return toast('Podaj nazwę zawodów');
   if (!isISODate(date)) return toast('Podaj datę zawodów');
-  state.races.push({ id: uid(), name, date, time: $('#raceTime').value.slice(0, 5) });
+  const fields = { name, date, time: $('#raceTime').value.slice(0, 5), place: $('#racePlace').value.trim() };
+
+  const existing = state.races.find(r => r.id === editingRaceId);
+  if (existing) {
+    if (existing.place !== fields.place) Object.assign(existing, { lat: null, lon: null, placeLabel: '' });
+    Object.assign(existing, fields);
+  } else {
+    state.races.push({ id: uid(), ...fields, lat: null, lon: null, placeLabel: '', result: null });
+  }
   save();
-  e.target.reset();
+  toast(existing ? 'Zapisano zmiany' : 'Dodano zawody');
+  resetRaceForm();
+  $('#raceFormCard').open = false;
   renderRaces();
-  toast('Dodano zawody');
+  renderCatalog();
 });
+
+$('#raceCancel').addEventListener('click', () => { resetRaceForm(); $('#raceFormCard').open = false; });
 
 $('#raceList').addEventListener('click', e => {
-  const btn = e.target.closest('[data-del]');
+  const btn = e.target.closest('button');
   if (!btn) return;
-  const race = state.races.find(r => r.id === btn.dataset.del);
-  if (!race || !confirm(`Usunąć zawody „${race.name}”?`)) return;
-  state.races = state.races.filter(r => r.id !== race.id);
-  save();
-  renderRaces();
-  toast('Usunięto zawody');
+  const race = state.races.find(r => r.id === (btn.dataset.del || btn.dataset.edit || btn.dataset.result));
+  if (!race) return;
+
+  if (btn.dataset.del) {
+    if (!confirm(`Usunąć zawody „${race.name}”?`)) return;
+    state.races = state.races.filter(r => r.id !== race.id);
+    save();
+    if (editingRaceId === race.id) resetRaceForm();
+    renderRaces();
+    renderCatalog();
+    toast('Usunięto zawody');
+  } else if (btn.dataset.edit) {
+    resetRaceForm();
+    editingRaceId = race.id;
+    $('#raceName').value = race.name;
+    $('#raceDate').value = race.date;
+    $('#raceTime').value = race.time;
+    $('#racePlace').value = race.place;
+    $('#raceFormTitle').textContent = 'Edytuj zawody';
+    $('#raceSubmit').textContent = 'Zapisz zmiany';
+    $('#raceCancel').hidden = false;
+    $('#raceFormCard').open = true;
+    $('#raceFormCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } else {
+    openResultDialog(race);
+  }
 });
 
-setInterval(tickRaces, 1000);
+/* Wyniki */
 
-/* ---------- 4. Checklista ---------- */
+const resultDialog = $('#resultDialog');
+let resultRaceId = null;
+
+function openResultDialog(race) {
+  resultRaceId = race.id;
+  const res = race.result || {};
+  $('#resultForm').reset();
+  $('#resultRace').textContent = `${race.name} · ${fmtDate(race.date)}`;
+  setDuration('res', res.time || 0);
+  $('#resPlace').value = res.place || '';
+  $('#resCat').value = res.cat || '';
+  $('#resNote').value = res.note || '';
+  $('#resDelete').hidden = !race.result;
+  resultDialog.showModal();
+}
+
+$('#resultForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const race = state.races.find(r => r.id === resultRaceId);
+  if (!race) return resultDialog.close();
+  const result = normalizeResult({
+    time: Math.round(readDuration('res')),
+    place: $('#resPlace').value,
+    cat: $('#resCat').value,
+    note: $('#resNote').value.trim()
+  });
+  if (!result) return toast('Wpisz czas, miejsce albo notatkę');
+  race.result = result;
+  save();
+  resultDialog.close();
+  renderRaces();
+  toast('Zapisano wynik');
+});
+
+$('#resDelete').addEventListener('click', () => {
+  const race = state.races.find(r => r.id === resultRaceId);
+  if (race && confirm('Usunąć wynik tych zawodów?')) {
+    race.result = null;
+    save();
+    resultDialog.close();
+    renderRaces();
+  }
+});
+
+$('#resCancel').addEventListener('click', () => resultDialog.close());
+
+/* Tapering przed najbliższymi zawodami */
+
+function renderTaper() {
+  const el = $('#taper');
+  const next = upcomingRaces()[0];
+  const today = today0();
+  const raceDay = next ? parseISODate(next.date) : null;
+  const days = next ? daysBetween(today, raceDay) : Infinity;
+  if (!next || days > 21) { el.innerHTML = ''; return; }
+
+  const taperStart = addDays(raceDay, -14);
+  const finalWeek = addDays(raceDay, -7);
+  const baseKm = kmBetween(toISODate(addDays(taperStart, -42)), toISODate(taperStart)) / 6;
+
+  let advice;
+  if (days > 14) advice = `Ostatnie dni normalnego treningu. Od ${fmtShort(taperStart)} zacznij zmniejszać kilometraż.`;
+  else if (days > 7) advice = 'Etap 1: jedź ok. 70% zwykłego kilometrażu. Zostaw 1–2 krótkie, mocne akcenty w tempie startowym, resztę spokojnie.';
+  else if (days > 1) advice = 'Etap 2: ok. 50% kilometrażu. Krótkie przyspieszenia w tempie startowym, dużo snu, a w ostatnie 2 dni więcej węglowodanów.';
+  else if (days === 1) advice = 'Jutro start! Krótka jazda 30–45 min z 2–3 przyspieszeniami po 30 s. Przygotuj rower, numer i przejrzyj checklistę.';
+  else advice = 'Dziś start – powodzenia! Zjedz śniadanie 2–3 h przed startem i zrób rozgrzewkę.';
+
+  const phases = [
+    { label: `${fmtShort(taperStart)} – ${fmtShort(addDays(finalWeek, -1))}`, share: 0.7, from: taperStart, to: finalWeek },
+    { label: `${fmtShort(finalWeek)} – ${fmtShort(addDays(raceDay, -1))}`, share: 0.5, from: finalWeek, to: raceDay }
+  ];
+  const rows = phases.map(p => {
+    const started = today >= p.from;
+    const done = kmBetween(toISODate(p.from), toISODate(p.to));
+    return `<tr><td>${p.label}</td><td>~${nf0.format(baseKm * p.share)} km</td><td>${started ? `${nf0.format(done)} km` : '—'}</td></tr>`;
+  }).join('');
+
+  el.innerHTML = `<div class="card taper">
+      <span class="race-tag">Przygotowanie do startu</span>
+      <h3>${esc(next.name)} · ${days === 0 ? 'dziś' : days === 1 ? 'jutro' : `za ${days} dni`}</h3>
+      <p class="taper-advice">${advice}</p>
+      ${baseKm > 0 ? `
+        <table class="splits">
+          <thead><tr><th>Okres</th><th>Cel</th><th>Przejechane</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <p class="note-small">Cel liczony od Twojej średniej z 6 tygodni przed taperem: ${nf0.format(baseKm)} km tygodniowo.</p>`
+        : '<p class="note-small">Dodaj przejazdy do dziennika, a pokażę, ile kilometrów jeździć w tych tygodniach.</p>'}
+      ${days <= 2 ? '<a class="btn btn-secondary btn-sm" href="#checklista">Otwórz checklistę</a>' : ''}
+    </div>`;
+}
+
+/* Pogoda z Open-Meteo (darmowa, bez klucza) */
+
+const WMO = {
+  0: 'Bezchmurnie', 1: 'Przeważnie słonecznie', 2: 'Częściowe zachmurzenie', 3: 'Pochmurno',
+  45: 'Mgła', 48: 'Mgła', 51: 'Lekka mżawka', 53: 'Mżawka', 55: 'Gęsta mżawka', 56: 'Marznąca mżawka', 57: 'Marznąca mżawka',
+  61: 'Słaby deszcz', 63: 'Deszcz', 65: 'Silny deszcz', 66: 'Marznący deszcz', 67: 'Marznący deszcz',
+  71: 'Słaby śnieg', 73: 'Śnieg', 75: 'Intensywny śnieg', 77: 'Śnieg ziarnisty',
+  80: 'Przelotny deszcz', 81: 'Przelotne opady', 82: 'Ulewy', 85: 'Przelotny śnieg', 86: 'Przelotny śnieg',
+  95: 'Burza', 96: 'Burza z gradem', 99: 'Burza z gradem'
+};
+const WIND_DIRS = ['płn.', 'płn.-wsch.', 'wsch.', 'płd.-wsch.', 'płd.', 'płd.-zach.', 'zach.', 'płn.-zach.'];
+const windDir = deg => WIND_DIRS[Math.round(deg / 45) % 8];
+const weatherCache = new Map();
+
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function ensureCoords(race) {
+  if (race.lat !== null && race.lon !== null) return true;
+  const query = race.place.split(',')[0].trim();
+  const data = await fetchJSON(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=1&language=pl&format=json`);
+  const hit = data.results && data.results[0];
+  if (!hit) return false;
+  race.lat = hit.latitude;
+  race.lon = hit.longitude;
+  race.placeLabel = [hit.name, hit.admin1, hit.country].filter(Boolean).join(', ');
+  save();
+  return true;
+}
+
+async function weatherHTML(race) {
+  const raceDay = parseISODate(race.date);
+  if (daysBetween(today0(), raceDay) > FORECAST_DAYS) {
+    return `<span class="muted">Prognoza pogody pojawi się ok. ${fmtShort(addDays(raceDay, -FORECAST_DAYS))}.</span>`;
+  }
+  if (!(await ensureCoords(race))) {
+    return `<span class="muted">Nie znaleziono miejscowości „${esc(race.place)}” – popraw ją w edycji zawodów.</span>`;
+  }
+  const f = await fetchJSON('https://api.open-meteo.com/v1/forecast'
+    + `?latitude=${race.lat}&longitude=${race.lon}&timezone=auto&start_date=${race.date}&end_date=${race.date}`
+    + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_direction_10m_dominant'
+    + '&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m');
+  const d = f.daily;
+  const rain = d.precipitation_probability_max[0];
+  let html = `<div class="weather-main"><strong>${WMO[d.weather_code[0]] || 'Prognoza'}</strong> · ${nf0.format(d.temperature_2m_min[0])}…${nf0.format(d.temperature_2m_max[0])}°C</div>
+    <div class="weather-sub">Opady: ${rain === null ? '—' : `${rain}%`} (${nf1.format(d.precipitation_sum[0] || 0)} mm) · wiatr do ${nf0.format(d.wind_speed_10m_max[0])} km/h z kier. ${windDir(d.wind_direction_10m_dominant[0])}</div>`;
+  const h = race.time ? Number(race.time.slice(0, 2)) : null;
+  const hr = f.hourly;
+  if (h !== null && hr && hr.temperature_2m[h] !== null && hr.temperature_2m[h] !== undefined) {
+    const p = hr.precipitation_probability[h];
+    html += `<div class="weather-sub">O ${race.time}: ${nf0.format(hr.temperature_2m[h])}°C, ${(WMO[hr.weather_code[h]] || '').toLowerCase()}, opady ${p === null ? '—' : `${p}%`}, wiatr ${nf0.format(hr.wind_speed_10m[h])} km/h</div>`;
+  }
+  html += `<div class="weather-src">Prognoza Open-Meteo${race.placeLabel ? ` · ${esc(race.placeLabel)}` : ''}</div>`;
+  return html;
+}
+
+function updateWeather() {
+  document.querySelectorAll('#raceList [data-weather]').forEach(async el => {
+    const race = state.races.find(r => r.id === el.dataset.weather);
+    if (!race) return;
+    const key = [race.id, race.date, race.time, race.place, toISODate(new Date())].join('|');
+    let entry = weatherCache.get(key);
+    if (!entry || Date.now() - entry.at > 30 * 60000) {
+      entry = {
+        at: Date.now(),
+        html: weatherHTML(race).catch(() => {
+          weatherCache.delete(key);
+          return '<span class="muted">Nie udało się pobrać prognozy – sprawdź połączenie z internetem.</span>';
+        })
+      };
+      weatherCache.set(key, entry);
+    }
+    el.innerHTML = await entry.html;
+  });
+}
+
+/* Kalendarz zawodów 2027 */
+
+let catalogFilter = 'all';
+
+function fmtCatalogDate(c) {
+  if (!c.date) return esc(c.when || '');
+  const start = parseISODate(c.date);
+  const opts = { day: 'numeric', month: 'long', year: 'numeric' };
+  if (!c.end) return start.toLocaleDateString('pl-PL', { weekday: 'short', ...opts });
+  const end = parseISODate(c.end);
+  return start.getMonth() === end.getMonth()
+    ? `${start.getDate()}–${end.toLocaleDateString('pl-PL', opts)}`
+    : `${fmtShort(start)} – ${end.toLocaleDateString('pl-PL', opts)}`;
+}
+
+const isAdded = c => state.races.some(r => r.date === c.date && raceKey(r.name) === raceKey(c.name));
+
+function renderCatalog() {
+  const today = toISODate(new Date());
+  const items = RACE_CATALOG
+    .filter(c => catalogFilter === 'all' || (catalogFilter === 'pl') === (c.country === 'Polska'))
+    .filter(c => !c.date || (c.end || c.date) >= today)
+    .sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999'));
+
+  $('#catalogList').innerHTML = items.length ? items.map(c => {
+    const i = RACE_CATALOG.indexOf(c);
+    const action = !c.date ? ''
+      : isAdded(c) ? '<button type="button" class="btn btn-ghost btn-sm" disabled>✓ Dodane do odliczania</button>'
+      : `<button type="button" class="btn btn-primary btn-sm" data-add="${i}">Dodaj do odliczania</button>`;
+    return `<li class="cat-item">
+        <div class="cat-date">${fmtCatalogDate(c)}</div>
+        <div class="cat-name">${esc(c.name)}</div>
+        <div class="cat-meta">${esc(c.type)} · ${esc([c.place, c.country].filter(Boolean).join(', '))}</div>
+        ${c.note ? `<p class="cat-note">${esc(c.note)}</p>` : ''}
+        <div class="cat-actions">
+          ${action}
+          <a class="btn btn-ghost btn-sm" href="${esc(c.url)}" target="_blank" rel="noopener">Źródło ↗</a>
+        </div>
+      </li>`;
+  }).join('') : empty('Brak zawodów w tej kategorii.');
+}
+
+$('#catalogList').addEventListener('click', e => {
+  const btn = e.target.closest('[data-add]');
+  if (!btn) return;
+  const c = RACE_CATALOG[Number(btn.dataset.add)];
+  if (!c || isAdded(c)) return;
+  state.races.push({
+    id: uid(), name: c.name, date: c.date, time: '', place: c.place,
+    lat: coord(c.lat), lon: coord(c.lon), placeLabel: c.place, result: null
+  });
+  save();
+  renderCatalog();
+  toast(`Dodano „${c.name}” do odliczania`);
+});
+
+document.querySelectorAll('[data-catalog]').forEach(btn => btn.addEventListener('click', () => {
+  catalogFilter = btn.dataset.catalog;
+  setPressed('[data-catalog]', btn);
+  renderCatalog();
+}));
+
+document.querySelectorAll('[data-raceview]').forEach(btn => btn.addEventListener('click', () => {
+  const mine = btn.dataset.raceview === 'mine';
+  setPressed('[data-raceview]', btn);
+  $('#raceViewMine').hidden = !mine;
+  $('#raceViewCatalog').hidden = mine;
+  if (mine) renderRaces();
+  else renderCatalog();
+}));
+
+/* ---------- 4. Narzędzia ---------- */
+
+document.querySelectorAll('[data-tool]').forEach(btn => btn.addEventListener('click', () => {
+  setPressed('[data-tool]', btn);
+  document.querySelectorAll('.tool').forEach(t => { t.hidden = t.id !== `tool-${btn.dataset.tool}`; });
+}));
+
+function renderTools() {
+  renderTires();
+  renderZones();
+  renderGear();
+}
+
+/* Ciśnienie w oponach – metoda 15% ugięcia opony (Frank Berto) */
+
+function renderTires() {
+  const out = $('#tireResult');
+  const width = num($('#tireWidth').value);
+  const rider = num($('#tireWeight').value);
+  const bike = num($('#tireBike').value) || 9;
+  document.querySelectorAll('#tireChips .chip').forEach(c => c.setAttribute('aria-pressed', String(num(c.dataset.mm) === width)));
+  if (!(rider > 0) || !(width >= 18 && width <= 70)) {
+    out.innerHTML = empty('Wpisz swoją wagę i szerokość opony (18–70 mm).');
+    return;
+  }
+  const lbs = (rider + bike + 1.5) * 2.20462; // +1,5 kg na bidony i drobiazgi
+  let factor = 1;
+  if ($('#tireType').value === 'tubeless') factor *= 0.92;
+  factor *= { smooth: 1, rough: 0.93, gravel: 0.85, wet: 0.92 }[$('#tireSurface').value] || 1;
+  const psi = share => Math.max(15, (153.6 * lbs * share / Math.pow(width, 1.5866) - 7.1) * factor);
+  const front = psi(0.45), rear = psi(0.55);
+  const bar = p => nf1.format(p / 14.5038);
+
+  const notes = [
+    'Nigdy nie przekraczaj maksymalnego ciśnienia podanego na oponie i na obręczy.',
+    'Manometry pomp potrafią się różnić o 0,2–0,5 bara – mierz zawsze tym samym.'
+  ];
+  if (rear / 14.5038 > 5) notes.unshift('<strong>Obręcze hookless</strong> (bez haczyka) mają zwykle limit 5 bar (72 psi) – w takim wypadku zostań przy 5 barach albo wybierz szerszą oponę.');
+
+  out.innerHTML = `
+    <div class="result-hero">
+      ${statTile('Przód', bar(front), 'bar', `${nf0.format(front)} psi`, true)}
+      ${statTile('Tył', bar(rear), 'bar', `${nf0.format(rear)} psi`, true)}
+    </div>
+    <div class="card">
+      <ul class="tips">${notes.map(n => `<li>${n}</li>`).join('')}</ul>
+      <p class="note-small">Punkt wyjścia wg metody 15% ugięcia opony (Frank Berto), z rozkładem masy 45% przód / 55% tył. Dostosuj o ±0,2 bara według odczuć.</p>
+    </div>`;
+}
+
+$('#tireChips').addEventListener('click', e => {
+  const chip = e.target.closest('.chip');
+  if (!chip) return;
+  $('#tireWidth').value = chip.dataset.mm;
+  $('#tireWidth').dispatchEvent(new Event('input', { bubbles: true }));
+});
+
+/* Strefy mocy i tętna */
+
+const POWER_ZONES = [
+  ['Z1', 'Regeneracja', 0, 0.55],
+  ['Z2', 'Wytrzymałość', 0.56, 0.75],
+  ['Z3', 'Tempo', 0.76, 0.90],
+  ['Z4', 'Próg', 0.91, 1.05],
+  ['Z5', 'VO₂max', 1.06, 1.20],
+  ['Z6', 'Beztlenowa', 1.21, 1.50],
+  ['Z7', 'Sprint', 1.51, null]
+];
+const HR_ZONES = [
+  ['Z1', 'Bardzo lekko', 0.50, 0.60],
+  ['Z2', 'Lekko – baza', 0.60, 0.70],
+  ['Z3', 'Umiarkowanie', 0.70, 0.80],
+  ['Z4', 'Mocno – próg', 0.80, 0.90],
+  ['Z5', 'Maksymalnie', 0.90, 1.00]
+];
+
+function wkgLevel(wkg) {
+  if (wkg < 2.0) return 'początkujący';
+  if (wkg < 2.8) return 'rekreacyjny';
+  if (wkg < 3.5) return 'wytrenowany amator';
+  if (wkg < 4.2) return 'mocny amator';
+  if (wkg < 5.0) return 'czołówka amatorów';
+  return 'poziom zawodowy';
+}
+
+function zoneTable(zones, value, unit) {
+  const rows = zones.map(([z, name, lo, hi], i) => {
+    const range = hi === null ? `> ${nf0.format(value * lo)}` : `${nf0.format(value * lo)}–${nf0.format(value * hi)}`;
+    const pct = hi === null ? `> ${Math.round(lo * 100)}%` : `${Math.round(lo * 100)}–${Math.round(hi * 100)}%`;
+    return `<tr><td><span class="zone-dot" style="opacity:${0.25 + i * (0.75 / (zones.length - 1))}"></span>${z} ${name}</td><td>${pct}</td><td>${range} ${unit}</td></tr>`;
+  }).join('');
+  return `<table class="splits"><thead><tr><th>Strefa</th><th>%</th><th>Zakres</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderZones() {
+  const out = $('#zoneResult');
+  const { ftp, weight, hrMax } = state.profile;
+  if (!ftp && !hrMax) {
+    out.innerHTML = empty('Wpisz FTP lub tętno maksymalne – pokażę Twoje strefy treningowe.');
+    return;
+  }
+  let html = '';
+  if (ftp && weight) {
+    const wkg = ftp / weight;
+    html += `<div class="result-hero">
+      ${statTile('Moc względna', nf2.format(wkg), 'W/kg', wkgLevel(wkg), true)}
+      ${statTile('FTP', nf0.format(ftp), 'W', `przy wadze ${nf1.format(weight)} kg`)}
+    </div>`;
+  }
+  if (ftp) html += `<div class="card"><h3 class="card-title">Strefy mocy</h3>${zoneTable(POWER_ZONES, ftp, 'W')}</div>`;
+  if (hrMax) html += `<div class="card"><h3 class="card-title">Strefy tętna</h3>${zoneTable(HR_ZONES, hrMax, 'ud./min')}</div>`;
+  out.innerHTML = html;
+}
+
+/* Zużycie sprzętu */
+
+const gearKm = g => kmBetween(g.since);
+
+function renderGear() {
+  const items = [...state.gear].sort((a, b) => (gearKm(b) / (b.limit || Infinity)) - (gearKm(a) / (a.limit || Infinity)));
+  $('#gearList').innerHTML = items.length ? items.map(g => {
+    const km = gearKm(g);
+    const ratio = g.limit ? km / g.limit : 0;
+    const cls = ratio >= 1 ? 'over' : ratio >= 0.9 ? 'warn' : '';
+    const status = !g.limit ? 'bez limitu'
+      : ratio >= 1 ? 'czas na wymianę!'
+      : `zostało ${nf0.format(g.limit - km)} km`;
+    return `<li class="gear-item">
+        <div class="gear-head">
+          <div>
+            <div class="gear-name">${esc(g.name)}</div>
+            <div class="race-date">od ${fmtDate(g.since)}</div>
+          </div>
+          <button type="button" class="icon-btn danger" data-del="${esc(g.id)}" aria-label="Usuń: ${esc(g.name)}">${ICON.trash}</button>
+        </div>
+        <div class="gear-km"><strong>${nf0.format(km)}</strong>${g.limit ? ` / ${nf0.format(g.limit)}` : ''} km <span class="gear-status ${cls}">${status}</span></div>
+        ${g.limit ? `<div class="progress"><div class="progress-bar ${cls}" style="width:${Math.min(100, ratio * 100)}%"></div></div>` : ''}
+        <button type="button" class="btn btn-secondary btn-sm" data-reset="${esc(g.id)}">Wymienione dziś</button>
+      </li>`;
+  }).join('') : '<li class="empty">Dodaj części, które chcesz śledzić – np. łańcuch czy opony.</li>';
+  if (!state.gear.length) $('#gearFormCard').open = true;
+}
+
+$('#gearChips').innerHTML = GEAR_PRESETS
+  .map(([name, km]) => `<button type="button" class="chip" data-name="${esc(name)}" data-km="${km}">${esc(name)}</button>`).join('');
+
+$('#gearChips').addEventListener('click', e => {
+  const chip = e.target.closest('.chip');
+  if (!chip) return;
+  $('#gearName').value = chip.dataset.name;
+  $('#gearLimit').value = chip.dataset.km;
+});
+
+$('#gearForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const name = $('#gearName').value.trim();
+  const since = $('#gearSince').value;
+  if (!name) return toast('Podaj nazwę części');
+  if (!isISODate(since)) return toast('Podaj datę montażu');
+  state.gear.push({ id: uid(), name, limit: Math.max(0, num($('#gearLimit').value)), since });
+  save();
+  e.target.reset();
+  $('#gearSince').value = toISODate(new Date());
+  $('#gearFormCard').open = false;
+  renderGear();
+  toast('Dodano część');
+});
+
+$('#gearList').addEventListener('click', e => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const g = state.gear.find(x => x.id === (btn.dataset.del || btn.dataset.reset));
+  if (!g) return;
+  if (btn.dataset.del) {
+    if (!confirm(`Usunąć „${g.name}” z listy?`)) return;
+    state.gear = state.gear.filter(x => x.id !== g.id);
+    toast('Usunięto');
+  } else {
+    if (!confirm(`Wymieniono „${g.name}”? Licznik zacznie się od dziś.`)) return;
+    g.since = toISODate(new Date());
+    toast('Licznik wyzerowany');
+  }
+  save();
+  renderGear();
+});
+
+/* ---------- 5. Checklista ---------- */
 
 function renderCheckProgress() {
   const items = state.checklist;
@@ -706,7 +1298,9 @@ $('#checkReset').addEventListener('click', () => {
 const backupDialog = $('#backupDialog');
 
 $('#backupBtn').addEventListener('click', () => backupDialog.showModal());
-backupDialog.addEventListener('click', e => { if (e.target === backupDialog) backupDialog.close(); });
+for (const dlg of [backupDialog, resultDialog]) {
+  dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
+}
 
 $('#exportBtn').addEventListener('click', () => {
   const data = { app: 'rowerowy-niezbednik', exportedAt: new Date().toISOString(), ...state };
@@ -729,17 +1323,18 @@ $('#importInput').addEventListener('change', async e => {
   let data;
   try {
     const raw = JSON.parse(await file.text());
-    if (!raw || !['rides', 'races', 'checklist'].some(k => Array.isArray(raw[k]))) throw new Error();
+    if (!raw || !['rides', 'races', 'checklist', 'gear'].some(k => Array.isArray(raw[k]))) throw new Error();
     data = normalize(raw);
   } catch (err) {
     backupDialog.close();
     return toast('To nie jest kopia zapasowa z tej aplikacji');
   }
-  const summary = `przejazdy: ${data.rides.length}, zawody: ${data.races.length}, pozycje checklisty: ${data.checklist.length}`;
+  const summary = `przejazdy: ${data.rides.length}, zawody: ${data.races.length}, części: ${data.gear.length}, pozycje checklisty: ${data.checklist.length}`;
   if (!confirm(`Wczytać kopię zapasową?\nW pliku: ${summary}.\n\nObecne dane zostaną zastąpione.`)) return;
   state = data;
   save();
   resetRideForm();
+  resetRaceForm();
   renderAll();
   backupDialog.close();
   toast('Wczytano kopię zapasową');
@@ -755,12 +1350,16 @@ window.addEventListener('storage', e => {
 /* ---------- Start ---------- */
 
 function renderAll() {
+  bindSettings();
   renderRides();
   renderPace();
   renderRaces();
+  renderCatalog();
+  renderTools();
   renderChecklist();
 }
 
 resetRideForm();
+$('#gearSince').value = toISODate(new Date());
 showTab(location.hash.slice(1));
 renderAll();
