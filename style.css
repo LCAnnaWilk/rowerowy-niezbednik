@@ -438,3 +438,28 @@ select:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color
 .gear-item .btn { margin-top: 12px; }
 
 .dialog-inner .field { margin: 0; }
+
+/* Baner ze zdjęciem */
+.hero {
+  display: grid; grid-template-columns: 1fr 42%;
+  min-height: 230px; margin-bottom: 16px;
+  background: #1c1814; color: #fff;
+  border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow);
+}
+.hero-text { position: relative; z-index: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; padding: 20px 4px 20px 20px; }
+.hero-kicker { font-size: .72rem; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: #ff8a4c; }
+.hero-text h2 { margin: 0; color: #fff; line-height: 1.15; }
+.hero-next { margin: 4px 0 0; font-size: .9rem; color: rgba(255, 255, 255, .82); overflow-wrap: anywhere; }
+.hero-next strong { color: #fff; }
+.hero-next a { color: #ff8a4c; }
+.hero-img { position: relative; }
+.hero-img img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 50% 18%; }
+.hero-img::before {
+  content: ""; position: absolute; inset: 0 auto 0 0; z-index: 1; width: 45%;
+  background: linear-gradient(90deg, #1c1814, rgba(28, 24, 20, 0));
+}
+@media (min-width: 640px) {
+  .hero { min-height: 280px; grid-template-columns: 1fr 36%; }
+  .hero-text { padding: 28px; }
+  .hero-text h2 { font-size: 1.9rem; }
+}

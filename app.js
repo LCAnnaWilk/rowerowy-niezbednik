@@ -715,6 +715,7 @@ function renderRaces() {
     ? upcoming.map(item).join('') + past.map(r => item(r, -1)).join('')
     : '<li class="empty">Brak zawodów. Dodaj własne powyżej albo wybierz z kalendarza 2027.</li>';
   if (!state.races.length) $('#raceFormCard').open = true;
+  renderHero();
   renderTaper();
   tickRaces();
   updateWeather();
@@ -852,6 +853,20 @@ $('#resDelete').addEventListener('click', () => {
 });
 
 $('#resCancel').addEventListener('click', () => resultDialog.close());
+
+/* Baner z najbliższym startem */
+
+function renderHero() {
+  $('#heroDate').textContent = new Date().toLocaleDateString('pl-PL', { weekday: 'long', day: 'numeric', month: 'long' });
+  const next = upcomingRaces()[0];
+  if (!next) {
+    $('#heroNext').innerHTML = 'Brak zaplanowanych startów – dodaj je w zakładce <a href="#zawody">Zawody</a>.';
+    return;
+  }
+  const days = daysBetween(today0(), parseISODate(next.date));
+  const when = days === 0 ? 'dziś' : days === 1 ? 'jutro' : `za ${days} ${plural(days, 'dzień', 'dni', 'dni')}`;
+  $('#heroNext').innerHTML = `Najbliższy start: <strong>${esc(next.name)}</strong> – ${when}`;
+}
 
 /* Tapering przed najbliższymi zawodami */
 
@@ -1031,6 +1046,7 @@ $('#catalogList').addEventListener('click', e => {
   });
   save();
   renderCatalog();
+  renderHero();
   toast(`Dodano „${c.name}” do odliczania`);
 });
 
