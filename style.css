@@ -467,3 +467,13 @@ select:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color
 /* Przypomnienie o kopii zapasowej */
 .reminder { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-color: var(--accent); background: var(--accent-soft); }
 .reminder p { margin: 2px 0 0; font-size: .9rem; color: var(--text); }
+
+/* Instalacja aplikacji */
+.install { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.install p { margin: 2px 0 0; font-size: .9rem; color: var(--muted); }
+.install-actions { display: flex; align-items: center; gap: 8px; }
+.steps { margin: 0; padding-left: 22px; display: grid; gap: 10px; }
+.inline-ico { width: 18px; height: 18px; vertical-align: -3px; color: var(--accent); }
+@media (display-mode: standalone) {
+  .topbar { padding-top: calc(10px + env(safe-area-inset-top)); }
+}

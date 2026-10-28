@@ -1395,6 +1395,94 @@ $('#importInput').addEventListener('change', async e => {
   toast('Wczytano kopię zapasową');
 });
 
+/* ---------- Instalacja na telefonie (PWA) ---------- */
+
+const INSTALL_DISMISS_KEY = 'rowerowy-niezbednik-instalacja-ukryta';
+const installDialog = $('#installDialog');
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isMobile = isIOS || /Android/i.test(navigator.userAgent);
+let installPrompt = null;
+
+const SHARE_ICON = '<svg class="ico inline-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m0 0L8 7m4-4l4 4"/><path d="M8 10H6v11h12V10h-2"/></svg>';
+
+function renderInstallCard() {
+  let dismissed = false;
+  try { dismissed = !!localStorage.getItem(INSTALL_DISMISS_KEY); } catch (e) { /* brak dostępu do pamięci */ }
+  const show = !isStandalone() && !dismissed && (isMobile || installPrompt);
+  $('#installCard').innerHTML = show
+    ? `<div class="card install">
+        <div><strong>Zainstaluj na telefonie</strong><p>Własna ikona, pełny ekran i działanie bez internetu. Za darmo.</p></div>
+        <div class="install-actions">
+          <button type="button" class="btn btn-primary btn-sm" data-install>Zainstaluj</button>
+          <button type="button" class="link-btn" data-install-dismiss>Nie teraz</button>
+        </div>
+      </div>`
+    : '';
+  $('#installOpen').hidden = isStandalone();
+}
+
+async function startInstall() {
+  if (installPrompt) {
+    installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+    installPrompt = null;
+    if (choice.outcome === 'accepted') toast('Aplikacja instaluje się na telefonie');
+    renderInstallCard();
+    return;
+  }
+  const hasData = state.rides.length + state.races.length + state.gear.length > 0;
+  $('#installSteps').innerHTML = isIOS
+    ? `<ol class="steps">
+        <li>Otwórz tę stronę w <strong>Safari</strong>.</li>
+        <li>Stuknij <strong>Udostępnij</strong> ${SHARE_ICON} na dole ekranu (albo w menu „⋯”).</li>
+        <li>Wybierz <strong>„Do ekranu początk.”</strong> i potwierdź <strong>„Dodaj”</strong>.</li>
+        <li>Od teraz otwieraj aplikację ikoną na ekranie początkowym.</li>
+      </ol>
+      <p class="hint">Na iPhonie zainstalowana aplikacja ma osobną pamięć. ${hasData
+        ? 'Żeby przenieść obecne dane: pobierz teraz kopię, a po instalacji wczytaj ją w aplikacji (ikona kopii w prawym górnym rogu).'
+        : 'Zacznij wpisywać dane już w zainstalowanej aplikacji.'}</p>
+      ${hasData ? '<button type="button" class="btn btn-secondary full" data-export>Pobierz kopię przed instalacją</button>' : ''}`
+    : `<ol class="steps">
+        <li>Otwórz tę stronę w <strong>Chrome</strong>.</li>
+        <li>Stuknij menu <strong>⋮</strong> w prawym górnym rogu.</li>
+        <li>Wybierz <strong>„Zainstaluj aplikację”</strong> albo <strong>„Dodaj do ekranu głównego”</strong>.</li>
+      </ol>
+      <p class="hint">Dane wpisane do tej pory zostaną – aplikacja korzysta z tej samej pamięci co przeglądarka.</p>`;
+  if (backupDialog.open) backupDialog.close();
+  installDialog.showModal();
+}
+
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  installPrompt = e;
+  renderInstallCard();
+});
+
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  renderInstallCard();
+});
+
+$('#installCard').addEventListener('click', e => {
+  if (e.target.closest('[data-install]')) startInstall();
+  if (e.target.closest('[data-install-dismiss]')) {
+    try { localStorage.setItem(INSTALL_DISMISS_KEY, '1'); } catch (err) { /* brak dostępu do pamięci */ }
+    renderInstallCard();
+  }
+});
+
+$('#installOpen').addEventListener('click', startInstall);
+
+installDialog.addEventListener('click', e => {
+  if (e.target === installDialog) installDialog.close();
+  if (e.target.closest('[data-export]')) exportBackup();
+});
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
+
 // Zmiany zrobione w innej karcie przeglądarki.
 window.addEventListener('storage', e => {
   if (e.key !== STORAGE_KEY) return;
@@ -1406,6 +1494,7 @@ window.addEventListener('storage', e => {
 
 function renderAll() {
   bindSettings();
+  renderInstallCard();
   renderBackupReminder();
   renderRides();
   renderPace();

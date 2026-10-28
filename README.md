@@ -13,3 +13,12 @@ Prosta aplikacja webowa dla kolarza startującego w zawodach. Działa w przeglą
 Dane zapisują się w pamięci przeglądarki (`localStorage`). Przycisk w prawym górnym rogu pozwala pobrać kopię zapasową do pliku JSON i wczytać ją z powrotem.
 
 Technologie: czysty HTML, CSS i JavaScript.
+
+## Instalacja na telefonie
+
+Aplikację można zainstalować za darmo jako PWA (własna ikona, pełny ekran, działanie bez internetu):
+
+- **iPhone:** otwórz stronę w Safari → Udostępnij → „Do ekranu początk.”.
+- **Android:** otwórz stronę w Chrome → menu ⋮ → „Zainstaluj aplikację”.
+
+Bez internetu działa wszystko poza prognozą pogody.
