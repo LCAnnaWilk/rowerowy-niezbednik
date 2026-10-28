@@ -7,7 +7,7 @@
   <meta name="description" content="Dziennik treningów, kalkulator tempa, zawody z odliczaniem i pogodą, narzędzia i checklista startowa dla kolarza.">
   <title>Rowerowy niezbędnik</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23e8590c'/%3E%3Cg fill='none' stroke='white' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='18' cy='40' r='10'/%3E%3Ccircle cx='46' cy='40' r='10'/%3E%3Cpath d='M18 40l9-15h12l7 15M27 25l-3-6h-5M39 25l2-6h5'/%3E%3C/g%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css?v=4">
+  <link rel="stylesheet" href="style.css?v=5">
 </head>
 <body>
   <header class="topbar">
@@ -36,9 +36,10 @@
           <p class="hero-next" id="heroNext"></p>
         </div>
         <div class="hero-img">
-          <img src="kolarz.jpg?v=4" alt="Kolarz z numerem startowym 377 na trasie zawodów" width="600" height="1237">
+          <img src="kolarz.jpg?v=5" alt="Kolarz z numerem startowym 377 na trasie zawodów" width="600" height="1237">
         </div>
       </div>
+      <div id="backupReminder"></div>
       <div class="stats" id="stats"></div>
 
       <div class="card">
@@ -274,12 +275,14 @@
     <form method="dialog" class="dialog-inner">
       <h2 id="backupTitle">Kopia zapasowa</h2>
       <p class="muted">Dane są zapisane tylko w tej przeglądarce. Pobierz kopię, żeby przenieść je na inne urządzenie albo nie stracić ich po wyczyszczeniu danych przeglądarki.</p>
+      <p class="hint" id="backupInfo"></p>
       <button type="button" class="btn btn-primary full" id="exportBtn">Pobierz kopię do pliku</button>
       <label class="btn btn-secondary full file-btn">
         Wczytaj kopię z pliku
         <input type="file" id="importInput" class="sr-only" accept=".json,application/json">
       </label>
       <p class="hint">Wczytanie kopii zastąpi wszystkie obecne dane.</p>
+      <p class="hint">Na iPhonie dodaj aplikację do ekranu początkowego (Udostępnij → „Do ekranu początk.”). Safari może usunąć dane stron, których nie otwierasz przez 7 dni.</p>
       <button value="close" class="btn btn-ghost full">Zamknij</button>
     </form>
   </dialog>
@@ -309,7 +312,7 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="races-2027.js?v=4"></script>
-  <script src="app.js?v=4"></script>
+  <script src="races-2027.js?v=5"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>

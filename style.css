@@ -463,3 +463,7 @@ select:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color
   .hero-text { padding: 28px; }
   .hero-text h2 { font-size: 1.9rem; }
 }
+
+/* Przypomnienie o kopii zapasowej */
+.reminder { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-color: var(--accent); background: var(--accent-soft); }
+.reminder p { margin: 2px 0 0; font-size: .9rem; color: var(--text); }

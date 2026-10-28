@@ -1,6 +1,8 @@
 'use strict';
 
 const STORAGE_KEY = 'rowerowy-niezbednik';
+const LAST_BACKUP_KEY = 'rowerowy-niezbednik-ostatnia-kopia';
+const BACKUP_REMINDER_DAYS = 14;
 const TABS = ['dziennik', 'tempo', 'zawody', 'narzedzia', 'checklista'];
 const DAY = 86400000;
 
@@ -195,7 +197,13 @@ function load() {
       const data = normalize(JSON.parse(raw));
       if (data) return data;
     }
-  } catch (e) { /* brak dostępu do pamięci lub uszkodzone dane */ }
+  } catch (e) {
+    // Uszkodzone dane odkładamy pod osobnym kluczem, żeby pierwszy zapis ich nie nadpisał.
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) localStorage.setItem(`${STORAGE_KEY}-uszkodzone-${Date.now()}`, raw);
+    } catch (err) { /* brak dostępu do pamięci */ }
+  }
   return normalize({});
 }
 
@@ -205,9 +213,13 @@ function save() {
   } catch (e) {
     toast('Nie udało się zapisać danych w przeglądarce');
   }
+  renderBackupReminder();
 }
 
 let state = load();
+
+// Prośba, by przeglądarka nie usuwała danych przy braku miejsca.
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
 /* Ustawienia narzędzi i profil – zapisywane przy każdej zmianie pola. */
 
@@ -1318,7 +1330,32 @@ for (const dlg of [backupDialog, resultDialog]) {
   dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
 }
 
-$('#exportBtn').addEventListener('click', () => {
+function lastBackup() {
+  try { return localStorage.getItem(LAST_BACKUP_KEY); } catch (e) { return null; }
+}
+
+function renderBackupReminder() {
+  const last = lastBackup();
+  const age = last && isISODate(last) ? daysBetween(parseISODate(last), today0()) : Infinity;
+  const info = age === Infinity ? 'Nie masz jeszcze kopii zapasowej.'
+    : `Ostatnia kopia: ${age === 0 ? 'dziś' : `${age} ${plural(age, 'dzień', 'dni', 'dni')} temu`}.`;
+  $('#backupInfo').textContent = info;
+  const entries = state.rides.length + state.races.length + state.gear.length;
+  $('#backupReminder').innerHTML = entries >= 3 && age >= BACKUP_REMINDER_DAYS
+    ? `<div class="card reminder">
+        <div><strong>Zrób kopię zapasową</strong><p>Dane są zapisane tylko w tej przeglądarce. ${info}</p></div>
+        <button type="button" class="btn btn-primary btn-sm" data-export>Pobierz kopię</button>
+      </div>`
+    : '';
+}
+
+$('#backupReminder').addEventListener('click', e => {
+  if (e.target.closest('[data-export]')) exportBackup();
+});
+
+$('#exportBtn').addEventListener('click', exportBackup);
+
+function exportBackup() {
   const data = { app: 'rowerowy-niezbednik', exportedAt: new Date().toISOString(), ...state };
   const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
   const a = document.createElement('a');
@@ -1328,9 +1365,11 @@ $('#exportBtn').addEventListener('click', () => {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  backupDialog.close();
+  try { localStorage.setItem(LAST_BACKUP_KEY, toISODate(new Date())); } catch (e) { /* brak dostępu do pamięci */ }
+  renderBackupReminder();
+  if (backupDialog.open) backupDialog.close();
   toast('Pobrano kopię zapasową');
-});
+}
 
 $('#importInput').addEventListener('change', async e => {
   const file = e.target.files[0];
@@ -1367,6 +1406,7 @@ window.addEventListener('storage', e => {
 
 function renderAll() {
   bindSettings();
+  renderBackupReminder();
   renderRides();
   renderPace();
   renderRaces();
